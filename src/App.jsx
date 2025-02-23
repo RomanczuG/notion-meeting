@@ -2,6 +2,7 @@ import { useEffect, useState, useRef, useCallback } from 'react';
 
 import Progress from './components/Progress';
 import MediaInput from './components/MediaInput';
+import MicrophoneInput from './components/MicrophoneInput';
 import Transcript from './components/Transcript';
 import LanguageSelector from './components/LanguageSelector';
 
@@ -31,10 +32,13 @@ function App() {
     const mediaInputRef = useRef(null);
     const [audio, setAudio] = useState(null);
     const [language, setLanguage] = useState('en');
+    const [isRecording, setIsRecording] = useState(false);
+    const [isRealtime, setIsRealtime] = useState(false);
 
     const [result, setResult] = useState(null);
     const [time, setTime] = useState(null);
     const [currentTime, setCurrentTime] = useState(0);
+    const [realtimeTranscript, setRealtimeTranscript] = useState({ transcript: '', segments: [] });
 
     const [device, setDevice] = useState('webgpu'); // Try use WebGPU first
     const [modelSize, setModelSize] = useState('gpu' in navigator ? 196 : 77); // WebGPU=196MB, WebAssembly=77MB
@@ -96,6 +100,15 @@ function App() {
                     setTime(e.data.time);
                     setStatus('ready');
                     break;
+
+                case 'chunk_complete':
+                    if (isRealtime) {
+                        setRealtimeTranscript(prev => ({
+                            transcript: prev.transcript + ' ' + e.data.result.transcript,
+                            segments: [...prev.segments, ...e.data.result.segments]
+                        }));
+                    }
+                    break;
             }
         };
 
@@ -106,7 +119,7 @@ function App() {
         return () => {
             worker.current.removeEventListener('message', onMessageReceived);
         };
-    }, []);
+    }, [isRealtime]);
 
     const handleClick = useCallback(() => {
         setResult(null);
@@ -121,6 +134,25 @@ function App() {
             });
         }
     }, [status, audio, language, device]);
+
+    const handleAudioChunk = useCallback((chunk) => {
+        if (worker.current && status === 'ready' && isRecording) {
+            worker.current.postMessage({
+                type: 'audioChunk',
+                data: { chunk, language }
+            });
+        }
+    }, [status, isRecording, language]);
+
+    const toggleRecording = useCallback(() => {
+        if (!isRecording) {
+            setRealtimeTranscript({ transcript: '', segments: [] });
+            setIsRealtime(true);
+            setIsRecording(true);
+        } else {
+            setIsRecording(false);
+        }
+    }, [isRecording]);
 
     return (
         <div className="flex flex-col h-screen mx-auto text-gray-800 dark:text-gray-200 bg-white dark:bg-gray-900 max-w-[600px]">
@@ -138,46 +170,53 @@ function App() {
             <div className="my-auto">
                 <div className="flex flex-col items-center mb-2 text-center">
                     <h1 className="text-5xl font-bold mb-2">Whisper Diarization</h1>
-                    <h2 className="text-xl font-semibold">In-browser automatic speech recognition w/ <br />word-level timestamps and speaker segmentation</h2>
+                    <h2 className="text-xl font-semibold">In-browser real-time speech recognition w/ <br />word-level timestamps and speaker segmentation</h2>
                 </div>
 
                 <div className="w-full min-h-[220px] flex flex-col justify-center items-center">
-                    {
-                        !audio && (
-                            <p className="mb-2">
-                                You are about to download <a href="https://huggingface.co/onnx-community/whisper-base_timestamped" target="_blank" rel="noreferrer" className="font-medium underline">whisper-base</a> and <a href="https://huggingface.co/onnx-community/pyannote-segmentation-3.0" target="_blank" rel="noreferrer" className="font-medium underline">pyannote-segmentation-3.0</a>,
-                                two powerful speech recognition models for generating word-level timestamps across 100 different languages and speaker segmentation, respectively.
-                                Once loaded, the models ({modelSize}MB + 6MB) will be cached and reused when you revisit the page.<br />
-                                <br />
-                                Everything runs locally in your browser using <a href="https://huggingface.co/docs/transformers.js" target="_blank" rel="noreferrer" className="underline">🤗&nbsp;Transformers.js</a> and ONNX Runtime Web,
-                                meaning no API calls are made to a server for inference. You can even disconnect from the internet after the model has loaded!
-                            </p>
-                        )
-                    }
+                    <div className="flex flex-col w-full m-3 max-w-[520px] gap-4">
+                        <div>
+                            <span className="text-sm mb-0.5">Microphone Input</span>
+                            <MicrophoneInput
+                                isRecording={isRecording}
+                                onAudioChunk={handleAudioChunk}
+                            />
+                        </div>
 
-                    <div className="flex flex-col w-full m-3 max-w-[520px]">
-                        <span className="text-sm mb-0.5">Input audio/video</span>
-                        <MediaInput
-                            ref={mediaInputRef}
-                            className="flex items-center border rounded-md cursor-pointer min-h-[100px] max-h-[500px] overflow-hidden"
-                            onInputChange={(audio) => {
-                                setResult(null);
-                                setAudio(audio);
-                            }}
-                            onTimeUpdate={(time) => setCurrentTime(time)}
-                        />
+                        <div>
+                            <span className="text-sm mb-0.5">Or upload audio/video file</span>
+                            <MediaInput
+                                ref={mediaInputRef}
+                                className="flex items-center border rounded-md cursor-pointer min-h-[100px] max-h-[500px] overflow-hidden"
+                                onInputChange={(audio) => {
+                                    setIsRealtime(false);
+                                    setResult(null);
+                                    setAudio(audio);
+                                }}
+                                onTimeUpdate={(time) => setCurrentTime(time)}
+                            />
+                        </div>
                     </div>
 
-                    <div className="relative w-full flex justify-center items-center">
+                    <div className="relative w-full flex justify-center items-center gap-4">
+                        {status === 'ready' && (
+                            <button
+                                className={`border px-4 py-2 rounded-lg ${isRecording ? 'bg-red-400 hover:bg-red-500' : 'bg-blue-400 hover:bg-blue-500'} text-white`}
+                                onClick={toggleRecording}
+                            >
+                                {isRecording ? 'Stop Recording' : 'Start Recording'}
+                            </button>
+                        )}
+
                         <button
                             className="border px-4 py-2 rounded-lg bg-blue-400 text-white hover:bg-blue-500 disabled:bg-blue-100 disabled:cursor-not-allowed select-none"
                             onClick={handleClick}
-                            disabled={status === 'running' || (status !== null && audio === null)}
+                            disabled={status === 'running' || (status !== null && audio === null) || isRecording}
                         >
                             {status === null ? 'Load model' :
                                 status === 'running'
                                     ? 'Running...'
-                                    : 'Run model'
+                                    : 'Process File'
                             }
                         </button>
 
@@ -185,27 +224,37 @@ function App() {
                             <div className='absolute right-0 bottom-0'>
                                 <span className="text-xs">Language:</span>
                                 <br />
-                                <LanguageSelector className="border rounded-lg p-1 max-w-[100px]" language={language} setLanguage={setLanguage} />
+                                <LanguageSelector 
+                                    className="border rounded-lg p-1 max-w-[100px]" 
+                                    language={language} 
+                                    setLanguage={setLanguage} 
+                                />
                             </div>
                         }
                     </div>
 
                     {
-                        result && time && (
+                        ((result && time && !isRealtime) || (isRealtime && realtimeTranscript.transcript)) && (
                             <>
                                 <div className="w-full mt-4 border rounded-md">
                                     <Transcript
                                         className="p-2 max-h-[200px] overflow-y-auto scrollbar-thin select-none"
-                                        transcript={result.transcript}
-                                        segments={result.segments}
+                                        transcript={isRealtime ? realtimeTranscript.transcript : result.transcript}
+                                        segments={isRealtime ? realtimeTranscript.segments : result.segments}
                                         currentTime={currentTime}
                                         setCurrentTime={(time) => {
                                             setCurrentTime(time);
-                                            mediaInputRef.current.setMediaTime(time);
+                                            if (!isRealtime && mediaInputRef.current) {
+                                                mediaInputRef.current.setMediaTime(time);
+                                            }
                                         }}
                                     />
                                 </div>
-                                <p className="text-sm text-gray-600 text-end p-1">Generation time: <span className="text-gray-800 font-semibold">{time.toFixed(2)}ms</span></p>
+                                {!isRealtime && (
+                                    <p className="text-sm text-gray-600 text-end p-1">
+                                        Generation time: <span className="text-gray-800 font-semibold">{time.toFixed(2)}ms</span>
+                                    </p>
+                                )}
                             </>
                         )
                     }
