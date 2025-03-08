@@ -26,25 +26,49 @@ class PipelineSingleton {
     static segmentation_processor = null;
 
     static async getInstance(progress_callback = null, device = 'webgpu') {
-        this.asr_instance ??= createPipeline('automatic-speech-recognition', this.asr_model_id, {
-            ...PER_DEVICE_CONFIG[device],
-            progress_callback,
-            chunk_length_s: 30,
-            stride_length_s: 5,
-        });
+        if (!this.asr_instance) {
+            this.asr_instance = await createPipeline('automatic-speech-recognition', this.asr_model_id, {
+                ...PER_DEVICE_CONFIG[device],
+                progress_callback,
+                chunk_length_s: 30,
+                stride_length_s: 5,
+                quantized: true, // Use quantized model to reduce memory
+            });
+        }
 
-        this.segmentation_processor ??= AutoProcessor.from_pretrained(this.segmentation_model_id, {
-            progress_callback,
-        });
-        this.segmentation_instance ??= AutoModelForAudioFrameClassification.from_pretrained(this.segmentation_model_id, {
-            // NOTE: WebGPU is not currently supported for this model
-            // See https://github.com/microsoft/onnxruntime/issues/21386
-            device: 'wasm',
-            dtype: 'fp32',
-            progress_callback,
-        });
+        if (!this.segmentation_processor) {
+            this.segmentation_processor = await AutoProcessor.from_pretrained(this.segmentation_model_id, {
+                progress_callback,
+            });
+        }
 
-        return Promise.all([this.asr_instance, this.segmentation_processor, this.segmentation_instance]);
+        if (!this.segmentation_instance) {
+            this.segmentation_instance = await AutoModelForAudioFrameClassification.from_pretrained(
+                this.segmentation_model_id,
+                {
+                    device: 'wasm',
+                    dtype: 'fp32',
+                    progress_callback,
+                    quantized: true, // Use quantized model to reduce memory
+                }
+            );
+        }
+
+        return [this.asr_instance, this.segmentation_processor, this.segmentation_instance];
+    }
+
+    static cleanup() {
+        if (this.asr_instance) {
+            this.asr_instance.dispose?.();
+            this.asr_instance = null;
+        }
+        if (this.segmentation_instance) {
+            this.segmentation_instance.dispose?.();
+            this.segmentation_instance = null;
+        }
+        if (this.segmentation_processor) {
+            this.segmentation_processor = null;
+        }
     }
 }
 
@@ -52,18 +76,20 @@ let transcriber = null;
 let segmentation_processor = null;
 let segmentation_model = null;
 let audioBuffer = [];
-const CHUNK_SIZE = 16000; // Process 1 second of audio at 16kHz
+const CHUNK_SIZE = 4096 * 8; // Process 2 seconds of audio at once
+const MAX_BUFFER_SIZE = CHUNK_SIZE * 2; // Keep max 4 seconds worth of data
+let lastKnownSpeaker = null;
 
 async function load({ device }) {
+    // Cleanup any existing instances
+    PipelineSingleton.cleanup();
+    
     self.postMessage({
         status: 'loading',
         data: `Loading models (${device})...`
     });
 
-    // Load the pipeline and save it for future use.
     const [asr, seg_processor, seg_model] = await PipelineSingleton.getInstance(x => {
-        // We also add a progress callback to the pipeline so that we can
-        // track model loading.
         self.postMessage(x);
     }, device);
 
@@ -77,7 +103,8 @@ async function load({ device }) {
             data: 'Compiling shaders and warming up model...'
         });
 
-        await transcriber(new Float32Array(16_000), {
+        // Smaller warmup size
+        await transcriber(new Float32Array(8_000), {
             language: 'en',
             return_timestamps: 'word',
         });
@@ -107,29 +134,115 @@ async function processAudioChunk(chunk, language) {
             floatData[i] = chunk[i] / 32767.0;
         }
 
+        // Check audio levels
+        const maxLevel = Math.max(...Array.from(floatData).map(Math.abs));
+        if (maxLevel < 0.01) {
+            return { transcript: '', segments: [] };
+        }
+
         // Run transcription and segmentation in parallel
         const [transcription, segments] = await Promise.all([
             transcriber(floatData, {
                 language,
                 return_timestamps: 'word',
-                chunk_length_s: 1,
+                chunk_length_s: 2,
                 stride_length_s: 0.5,
+            }).catch(e => {
+                console.error('❌ Transcription error:', e);
+                return { text: '', chunks: [] };
             }),
-            segment(segmentation_processor, segmentation_model, floatData)
+            segment(segmentation_processor, segmentation_model, floatData).catch(e => {
+                console.error('❌ Segmentation error:', e);
+                return [];
+            })
         ]);
 
-        return {
-            text: transcription.text,
-            chunks: segments.map(seg => ({
-                ...seg,
-                text: transcription.chunks.find(c => 
-                    c.timestamp[0] >= seg.start && c.timestamp[1] <= seg.end
-                )?.text || ''
-            }))
+        // Clean up the float data
+        floatData.fill(0);
+
+        // First, merge speaker segments that are close together
+        const mergedSpeakerSegments = [];
+        let currentSegment = null;
+
+        for (const seg of segments) {
+            if (!currentSegment) {
+                currentSegment = { ...seg };
+                continue;
+            }
+
+            // If same speaker and gap is less than 1 second, merge segments
+            if (seg.label === currentSegment.label && 
+                (seg.start - currentSegment.end) < 1.0) {
+                currentSegment.end = seg.end;
+            } else {
+                mergedSpeakerSegments.push(currentSegment);
+                currentSegment = { ...seg };
+            }
+        }
+        if (currentSegment) {
+            mergedSpeakerSegments.push(currentSegment);
+        }
+
+        // Now assign transcribed text to speaker segments
+        const processedSegments = [];
+        if (transcription.text) {
+            let speakerToUse = 'NO_SPEAKER';
+            
+            if (mergedSpeakerSegments.length > 0) {
+                // Calculate speaker durations and confidence
+                const speakerDurations = {};
+                mergedSpeakerSegments.forEach(seg => {
+                    const duration = seg.end - seg.start;
+                    speakerDurations[seg.label] = (speakerDurations[seg.label] || 0) + duration;
+                });
+
+                // Find the dominant speaker
+                const [dominantSpeaker, duration] = Object.entries(speakerDurations)
+                    .reduce((a, b) => a[1] > b[1] ? a : b);
+
+                // If the dominant speaker has significant duration, use it
+                if (duration > 0.5) { // More than 0.5 seconds of speech
+                    speakerToUse = dominantSpeaker;
+                    lastKnownSpeaker = dominantSpeaker;
+                } else if (lastKnownSpeaker && transcription.text.trim() && 
+                         !transcription.text.includes('[BLANK_AUDIO]')) {
+                    // Use last known speaker if we have actual speech
+                    speakerToUse = lastKnownSpeaker;
+                }
+            } else if (lastKnownSpeaker && transcription.text.trim() && 
+                      !transcription.text.includes('[BLANK_AUDIO]')) {
+                // Use last known speaker if we have actual speech
+                speakerToUse = lastKnownSpeaker;
+            }
+
+            // Create a segment with the full transcription
+            processedSegments.push({
+                start: 0,
+                end: chunk.length / 16000,
+                label: speakerToUse,
+                text: transcription.text
+            });
+        }
+
+        const result = {
+            transcript: transcription.text || '',
+            segments: processedSegments
         };
+
+        if (result.transcript) {
+            self.postMessage({
+                type: 'chunk_complete',
+                result: {
+                    transcript: result.transcript,
+                    segments: result.segments || []
+                }
+            });
+        }
+
+        return result;
     } catch (error) {
-        console.error('Error processing audio chunk:', error);
-        throw error;
+        console.error('❌ Error processing audio chunk:', error);
+        return { transcript: '', segments: [] };
     }
 }
 
@@ -173,19 +286,19 @@ self.addEventListener('message', async (event) => {
                 break;
 
             case 'audioChunk':
-                // Handle incoming audio chunk
                 audioBuffer = audioBuffer.concat(Array.from(data.chunk));
                 
                 // Process when we have enough data
                 if (audioBuffer.length >= CHUNK_SIZE) {
                     const audioToProcess = new Int16Array(audioBuffer.slice(0, CHUNK_SIZE));
                     audioBuffer = audioBuffer.slice(CHUNK_SIZE);
-                    
-                    const result = await processAudioChunk(audioToProcess, data.language);
-                    self.postMessage({
-                        status: 'chunk_complete',
-                        result
-                    });
+                    await processAudioChunk(audioToProcess, data.language);
+                    audioToProcess.fill(0);
+                }
+                
+                // Limit buffer size
+                if (audioBuffer.length > MAX_BUFFER_SIZE) {
+                    audioBuffer = audioBuffer.slice(-MAX_BUFFER_SIZE);
                 }
                 break;
 
@@ -193,11 +306,17 @@ self.addEventListener('message', async (event) => {
                 await run(data);
                 break;
 
+            case 'cleanup':
+                PipelineSingleton.cleanup();
+                audioBuffer = [];
+                lastKnownSpeaker = null;
+                break;
+
             default:
-                console.warn('Unknown message type:', type);
+                console.warn('⚠️ Unknown message type:', type);
         }
     } catch (error) {
-        console.error('Worker error:', error);
+        console.error('❌ Worker error:', error);
         self.postMessage({ 
             status: 'error', 
             error: error.message 

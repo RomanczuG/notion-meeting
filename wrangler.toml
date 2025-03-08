@@ -1,0 +1,17 @@
+name = "swift_serve"
+compatibility_date = "2024-10-19"
+
+pages_build_output_dir = "./dist"
+
+[[r2_buckets]]
+binding = 'MY_BUCKET'
+bucket_name = 'shortcuts'
+
+[[d1_databases]]
+binding = "DB" # i.e. available in your Worker on env.DB
+database_name = "shortcuts-database"
+database_id = "c418d271-baf1-467e-b879-71e721988cdd"
+
+[env.production]
+d1_databases = [{ binding = "DB", database_name = "shortcuts-database", database_id = "c418d271-baf1-467e-b879-71e721988cdd" }]
+r2_buckets = [{ binding = "MY_BUCKET", bucket_name = "shortcuts" }]
