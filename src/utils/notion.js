@@ -283,6 +283,126 @@ class NotionClient {
             throw error;
         }
     }
+
+    async readPage(pageId) {
+        if (this.isDemo) {
+            console.log('Reading demo page:', pageId);
+            const page = this.demoPages.find(p => p.id === pageId);
+            if (!page) throw new Error('Demo page not found');
+            return { content: page.content?.join('\n') || '' };
+        }
+        
+        console.log(`Reading page content for page: ${pageId}`);
+        
+        try {
+            // Check if pageId is valid - sometimes it might be a complex object
+            let actualPageId = pageId;
+            if (typeof pageId === 'object' && pageId !== null) {
+                actualPageId = pageId.id || pageId;
+                console.log(`Extracted page ID from object: ${actualPageId}`);
+            }
+            
+            // Use our serverless function to read the page
+            const response = await fetch(`/api/notion/read-page?page_id=${encodeURIComponent(actualPageId)}`, {
+                method: 'GET',
+                headers: {
+                    'Authorization': this.authHeader,
+                    'Content-Type': 'application/json',
+                }
+            });
+
+            const data = await response.json();
+            
+            if (!response.ok) {
+                console.error('Error reading page:', data);
+                throw new Error(`Failed to read Notion page: ${response.statusText}`);
+            }
+
+            console.log(`Successfully read page with ${data.blocks?.length || 0} blocks`);
+            return data;
+        } catch (error) {
+            console.error('Error in readPage:', error);
+            throw error;
+        }
+    }
+
+    async updateEntirePage(pageId, content) {
+        if (this.isDemo) {
+            console.log('Updating entire demo page:', pageId);
+            const page = this.demoPages.find(p => p.id === pageId);
+            if (!page) throw new Error('Demo page not found');
+            // Replace entire content
+            page.content = [content];
+            return { success: true };
+        }
+        
+        console.log(`Updating entire page ${pageId} with new content`);
+        
+        try {
+            // Check if pageId is valid - sometimes it might be a complex object
+            let actualPageId = pageId;
+            if (typeof pageId === 'object' && pageId !== null) {
+                actualPageId = pageId.id || pageId;
+                console.log(`Extracted page ID from object: ${actualPageId}`);
+            }
+            
+            // First, get the current blocks to delete them
+            const currentBlocks = await this.readPage(actualPageId);
+            const blockIds = currentBlocks.blocks?.map(block => block.id) || [];
+            
+            // Delete existing blocks if there are any
+            if (blockIds.length > 0) {
+                console.log(`Deleting ${blockIds.length} existing blocks`);
+                
+                // Delete blocks in batches of 10 to avoid rate limits
+                for (let i = 0; i < blockIds.length; i += 10) {
+                    const batchIds = blockIds.slice(i, i + 10);
+                    for (const blockId of batchIds) {
+                        try {
+                            await fetch(`https://api.notion.com/v1/blocks/${blockId}`, {
+                                method: 'DELETE',
+                                headers: {
+                                    'Authorization': this.authHeader,
+                                    'Content-Type': 'application/json',
+                                    'Notion-Version': '2022-06-28'
+                                }
+                            });
+                        } catch (deleteError) {
+                            console.error(`Failed to delete block ${blockId}:`, deleteError);
+                            // Continue with other blocks
+                        }
+                    }
+                }
+            }
+            
+            // Then add the new content
+            const response = await fetch(`/api/notion/append`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': this.authHeader,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    pageId: actualPageId,
+                    content,
+                    speaker: null // No speaker label since we're adding formatted content
+                })
+            });
+
+            const data = await response.json();
+            
+            if (!response.ok) {
+                console.error('Error updating page:', data);
+                throw new Error(`Failed to update Notion page: ${response.statusText}`);
+            }
+
+            console.log('Successfully updated entire Notion page');
+            return data;
+        } catch (error) {
+            console.error('Error in updateEntirePage:', error);
+            throw error;
+        }
+    }
 }
 
 // Get Notion OAuth URL for the authorization step

@@ -8,6 +8,7 @@ import LanguageSelector from './components/LanguageSelector';
 import NotionClient, { getNotionAccessToken, simulateNotionToken } from './utils/notion';
 import NotionAuth from './components/NotionAuth';
 import NotionPageSelector from './components/NotionPageSelector';
+import { enhanceTranscript, enhanceWholeTranscript } from './utils/gpt';
 
 // 1a3316d6a1f2807ebf1be5dcf6cd849a databse_id
 // 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 api_key
@@ -61,6 +62,11 @@ function App() {
     const [notionStatus, setNotionStatus] = useState(''); // Add status for notification
     const lastProcessedSegment = useRef(null);
 
+    // Batch processing for GPT
+    const [pendingTranscriptBatch, setPendingTranscriptBatch] = useState([]);
+    const [batchCounter, setBatchCounter] = useState(0);
+    const BATCH_SIZE = 10; // Process every 10 transcriptions
+
     // Automatically clear Notion status after 3 seconds
     useEffect(() => {
         if (!notionStatus) return;
@@ -113,8 +119,23 @@ function App() {
 
     // Handle selecting a specific Notion page
     const handleSelectNotionPage = useCallback((page) => {
+        console.log('Selected Notion page:', page);
+        if (!page || !page.id) {
+            console.error('Invalid page selected:', page);
+            setNotionStatus('Error: Invalid page selected');
+            return;
+        }
+        
+        // Store the page immediately to ensure it's available for transcription
         setSelectedNotionPage(page);
-    }, []);
+        
+        // If we're already recording, update the current page
+        if (isRecording) {
+            console.log('Already recording, updating current page to:', page.id);
+            setCurrentNotionPage(page);
+            setNotionStatus(`Switched to Notion page: ${getPageTitle(page)}`);
+        }
+    }, [isRecording]);
 
     // Create a new Notion page when starting recording (if no page is selected)
     useEffect(() => {
@@ -228,6 +249,81 @@ function App() {
         };
     }, [realtimeTranscript, currentNotionPage, notionClient]);
 
+    // Reset batching when recording is stopped
+    useEffect(() => {
+        if (!isRecording) {
+            // Process any remaining transcripts in the batch
+            if (pendingTranscriptBatch.length > 0 && notionClient && currentNotionPage) {
+                processTranscriptBatch();
+            }
+            // Reset batch counter and pending batch
+            setBatchCounter(0);
+            setPendingTranscriptBatch([]);
+        }
+    }, [isRecording]);
+    
+    // Function to process a batch of transcripts
+    const processTranscriptBatch = async () => {
+        if (!notionClient || !currentNotionPage || pendingTranscriptBatch.length === 0) return;
+        
+        try {
+            setNotionStatus(`Processing batch of ${pendingTranscriptBatch.length} transcripts...`);
+            
+            // 1. Read the current page content
+            let pageContent = '';
+            try {
+                const pageData = await notionClient.readPage(currentNotionPage.id);
+                pageContent = pageData.content || '';
+                console.log('Current page content length:', pageContent.length);
+            } catch (readError) {
+                console.error('Error reading page:', readError);
+                // Continue with empty content if reading fails
+            }
+            
+            // 2. Enhance the transcript with GPT-4o-mini
+            setNotionStatus('Enhancing transcript with GPT-4o-mini...');
+            const enhancedResult = await enhanceWholeTranscript(
+                pageContent,
+                pendingTranscriptBatch
+            );
+            
+            // 3. Update the entire Notion page
+            if (enhancedResult.success) {
+                console.log('Enhanced content:', enhancedResult.enhanced);
+                setNotionStatus('Updating Notion page with enhanced transcript...');
+                
+                await notionClient.updateEntirePage(
+                    currentNotionPage.id,
+                    enhancedResult.enhanced
+                );
+                
+                console.log('✅ Successfully updated Notion page with enhanced content');
+                setNotionStatus('Updated Notion page with enhanced transcript');
+            } else {
+                // Fallback to basic formatting if enhancement fails
+                console.log('Using basic formatting due to enhancement failure');
+                
+                const formattedText = pendingTranscriptBatch.map(seg => 
+                    seg.speaker ? `### Speaker ${seg.speaker}\n${seg.text.trim()}` : seg.text.trim()
+                ).join('\n\n');
+                
+                await notionClient.updateEntirePage(
+                    currentNotionPage.id,
+                    formattedText
+                );
+                
+                console.log('✅ Updated Notion page with basic formatting');
+                setNotionStatus('Updated Notion page with basic formatting');
+            }
+            
+            // Clear the batch after processing
+            setPendingTranscriptBatch([]);
+        } catch (error) {
+            console.error('Error processing transcript batch:', error);
+            setNotionStatus(`Error: ${error.message}`);
+        }
+    };
+
     // We use the `useEffect` hook to setup the worker as soon as the `App` component is mounted.
     useEffect(() => {
         if (!worker.current) {
@@ -236,23 +332,66 @@ function App() {
             });
         }
 
-        const onMessageReceived = (e) => {
+        const onMessageReceived = async (e) => {
+            // Debug all worker messages
+            console.log('Worker message received:', e.data.type, e.data);
+            
             if (e.data.type === 'chunk_complete' && isRealtime && e.data.result?.transcript) {
                 // Skip logging if it's just [BLANK_AUDIO]
                 if (e.data.result.transcript.trim() === '[BLANK_AUDIO]') return;
 
-                // Only log if we have actual speech content
+                // Only process if we have actual speech content
                 const hasContent = e.data.result.segments.some(seg => 
                     seg.text.trim() && !seg.text.includes('[BLANK_AUDIO]')
                 );
 
                 if (hasContent) {
-                    // console.log('\n💬', e.data.result.transcript);
-                    e.data.result.segments.forEach(seg => {
-                        if (seg.text.trim() && !seg.text.includes('[BLANK_AUDIO]')) {
-                            console.log(`${seg.label}: "${seg.text.trim()}"`);
-                        }
+                    // More verbose logging to debug
+                    console.log(`\n💬 TRANSCRIPTION UPDATE (segments: ${e.data.result.segments.length}):`, e.data.result);
+                    
+                    // Update realtimeTranscript state with new segments
+                    setRealtimeTranscript(prev => {
+                        const newTranscript = {
+                            transcript: e.data.result.transcript,
+                            segments: [...prev.segments, ...e.data.result.segments]
+                        };
+                        return newTranscript;
                     });
+                    
+                    // Add valid segments to the pending batch
+                    const validSegments = e.data.result.segments.filter(seg => 
+                        seg.text.trim() && !seg.text.includes('[BLANK_AUDIO]')
+                    );
+                    
+                    if (validSegments.length > 0 && notionClient && currentNotionPage) {
+                        // Log segments
+                        validSegments.forEach(seg => {
+                            console.log(`${seg.label}: "${seg.text.trim()}"`);
+                        });
+                        
+                        // Add to pending batch
+                        setPendingTranscriptBatch(prev => [
+                            ...prev, 
+                            ...validSegments.map(seg => ({ 
+                                text: seg.text.trim(), 
+                                speaker: seg.label 
+                            }))
+                        ]);
+                        
+                        // Increment batch counter
+                        const newCount = batchCounter + validSegments.length;
+                        setBatchCounter(newCount);
+                        
+                        // Process batch if we've reached the threshold
+                        if (newCount >= BATCH_SIZE) {
+                            console.log(`Batch threshold reached (${newCount}). Processing batch...`);
+                            setBatchCounter(0);
+                            processTranscriptBatch();
+                        } else {
+                            console.log(`Added to batch. Current count: ${newCount}/${BATCH_SIZE}`);
+                        }
+                    }
+                    
                     console.log('------------------------');
                 }
                 return;
@@ -304,7 +443,7 @@ function App() {
         return () => {
             worker.current.removeEventListener('message', onMessageReceived);
         };
-    }, [isRealtime]);
+    }, [isRealtime, notionClient, currentNotionPage, batchCounter, pendingTranscriptBatch]);
 
     const handleClick = useCallback(() => {
         setResult(null);
@@ -383,6 +522,7 @@ function App() {
         }
     }, [isRecording]);
 
+    // Handle worker messages (transcription results)
     const handleWorkerMessage = useCallback((e) => {
         if (e.data.type === 'chunk_complete') {
             if (e.data.result?.transcript) {
@@ -399,7 +539,35 @@ function App() {
         } else if (e.data.type === 'error') {
             console.error('❌ Worker error:', e.data.error);
         }
-    }, []);
+        
+        // If we get a real-time transcript segment, send it to Notion immediately
+        if (e.data.type === 'realtime' && e.data.data && e.data.data.segments && e.data.data.segments.length > 0) {
+            console.log('Received realtime transcript with segments:', e.data.data.segments.length);
+            
+            // Send the latest segment directly to Notion if we're connected
+            const segments = e.data.data.segments;
+            if (segments.length > 0 && notionClient && currentNotionPage) {
+                const latestSegment = segments[segments.length - 1];
+                
+                // Only send if the segment has text
+                if (latestSegment.text && latestSegment.text.trim()) {
+                    // Format text with speaker label if available
+                    const formattedText = latestSegment.speaker 
+                        ? `[${latestSegment.speaker}] ${latestSegment.text.trim()}`
+                        : latestSegment.label 
+                            ? `[Speaker ${latestSegment.label}] ${latestSegment.text.trim()}`
+                            : latestSegment.text.trim();
+                    
+                    console.log('Sending latest segment to Notion immediately:', formattedText);
+                    
+                    // Send to Notion without awaiting (fire and forget)
+                    notionClient.appendToPage(currentNotionPage.id, formattedText, latestSegment.label || latestSegment.speaker)
+                        .then(() => console.log('Successfully sent segment to Notion'))
+                        .catch(err => console.error('Failed to send segment to Notion:', err));
+                }
+            }
+        }
+    }, [notionClient, currentNotionPage]);
 
     return (
         <div className="flex flex-col h-screen mx-auto text-gray-800 dark:text-gray-200 bg-white dark:bg-gray-900 max-w-[600px]">
