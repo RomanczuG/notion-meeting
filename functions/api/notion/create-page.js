@@ -46,6 +46,51 @@ export async function onRequest(context) {
       });
     }
 
+    console.log(`Creating new page in database ${databaseId}: "${title}"`);
+
+    // Prepare the request payload
+    const payload = {
+      parent: { database_id: databaseId },
+      properties: {
+        // Different databases might use different property names for the title
+        // Try both 'Name' (default) and 'title' as fallbacks
+        Name: {
+          title: [
+            {
+              text: {
+                content: title
+              }
+            }
+          ]
+        },
+        title: {
+          title: [
+            {
+              text: {
+                content: title
+              }
+            }
+          ]
+        }
+      },
+      children: [
+        {
+          object: 'block',
+          type: 'paragraph',
+          paragraph: {
+            rich_text: [
+              {
+                type: 'text',
+                text: {
+                  content: 'Meeting transcript will appear here.'
+                }
+              }
+            ]
+          }
+        }
+      ]
+    };
+
     // Call Notion API to create a page
     const response = await fetch('https://api.notion.com/v1/pages', {
       method: 'POST',
@@ -54,45 +99,35 @@ export async function onRequest(context) {
         'Authorization': authorization,
         'Notion-Version': '2022-06-28'
       },
-      body: JSON.stringify({
-        parent: { database_id: databaseId },
-        properties: {
-          Name: {
-            title: [
-              {
-                text: {
-                  content: title
-                }
-              }
-            ]
-          }
-        },
-        children: [
-          {
-            object: 'block',
-            type: 'paragraph',
-            paragraph: {
-              rich_text: []
-            }
-          }
-        ]
-      })
+      body: JSON.stringify(payload)
     });
 
-    // Get response as JSON
-    const data = await response.json();
+    // Get response as text first for debugging
+    const responseText = await response.text();
+    
+    // Try to parse the response as JSON
+    let data;
+    try {
+      data = JSON.parse(responseText);
+    } catch (e) {
+      console.error('Failed to parse response as JSON:', responseText);
+      data = { error: 'Invalid JSON response', raw: responseText };
+    }
 
     // If Notion API returns an error
     if (!response.ok) {
-      console.error('Notion API error:', data);
+      console.error(`Notion API error (${response.status}):`, data);
       return new Response(JSON.stringify({ 
         error: 'Failed to create page in Notion',
+        status: response.status,
         details: data
       }), {
         status: response.status,
         headers
       });
     }
+
+    console.log(`Successfully created page with ID: ${data.id}`);
 
     // Return the created page to the client
     return new Response(JSON.stringify(data), { headers });

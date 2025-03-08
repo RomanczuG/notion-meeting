@@ -72,6 +72,8 @@ export async function onRequest(context) {
       ]
     };
 
+    console.log('Request payload:', JSON.stringify(payload));
+
     // Call Notion API to append to a page
     const response = await fetch(`https://api.notion.com/v1/blocks/${pageId}/children`, {
       method: 'PATCH',
@@ -83,14 +85,25 @@ export async function onRequest(context) {
       body: JSON.stringify(payload)
     });
 
-    // Get response as JSON
-    const data = await response.json();
+    // Get response as text first for debugging
+    const responseText = await response.text();
+    console.log('Notion API response:', responseText);
+    
+    // Try to parse the response as JSON
+    let data;
+    try {
+      data = JSON.parse(responseText);
+    } catch (e) {
+      console.error('Failed to parse response as JSON:', responseText);
+      data = { error: 'Invalid JSON response', raw: responseText };
+    }
 
     // If Notion API returns an error
     if (!response.ok) {
-      console.error('Notion API error:', data);
+      console.error(`Notion API error (${response.status}):`, data);
       return new Response(JSON.stringify({ 
         error: 'Failed to append to page in Notion',
+        status: response.status,
         details: data
       }), {
         status: response.status,

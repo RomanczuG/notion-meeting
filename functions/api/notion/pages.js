@@ -40,6 +40,13 @@ export async function onRequest(context) {
 
     console.log(`Fetching pages for database: ${databaseId}`);
 
+    // Format database ID correctly (remove any dashes or extra formatting)
+    const formattedDatabaseId = databaseId.replace(/-/g, "");
+
+    // Log the auth header (without the actual token for security)
+    const authType = authorization.split(' ')[0];
+    console.log(`Auth type: ${authType}`);
+
     // Call Notion API to get database pages
     const response = await fetch(`https://api.notion.com/v1/databases/${databaseId}/query`, {
       method: 'POST',
@@ -49,30 +56,36 @@ export async function onRequest(context) {
         'Notion-Version': '2022-06-28'
       },
       body: JSON.stringify({
-        page_size: 100,
-        sorts: [
-          {
-            property: 'last_edited_time',
-            direction: 'descending'
-          }
-        ]
+        page_size: 100
       })
     });
 
-    // Get response as JSON
-    const data = await response.json();
+    // Get response as text first for debugging
+    const responseText = await response.text();
+    
+    // Try to parse the response as JSON
+    let data;
+    try {
+      data = JSON.parse(responseText);
+    } catch (e) {
+      console.error('Failed to parse response as JSON:', responseText);
+      data = { error: 'Invalid JSON response', raw: responseText };
+    }
 
     // If Notion API returns an error
     if (!response.ok) {
-      console.error('Notion API error:', data);
+      console.error(`Notion API error (${response.status}):`, data);
       return new Response(JSON.stringify({ 
         error: 'Failed to fetch pages from Notion',
+        status: response.status,
         details: data
       }), {
         status: response.status,
         headers
       });
     }
+
+    console.log(`Successfully retrieved ${data.results?.length || 0} pages`);
 
     // Return the pages to the client
     return new Response(JSON.stringify(data), { headers });

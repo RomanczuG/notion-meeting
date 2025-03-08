@@ -8,6 +8,7 @@ const NotionPageSelector = ({ notionClient, onSelectPage, selectedPageId }) => {
     const [pages, setPages] = useState([]);
     const [loadingPages, setLoadingPages] = useState(false);
     const [isVisible, setIsVisible] = useState(false);
+    const [manualPageEntry, setManualPageEntry] = useState('');
 
     // Load available databases when component mounts
     useEffect(() => {
@@ -40,7 +41,15 @@ const NotionPageSelector = ({ notionClient, onSelectPage, selectedPageId }) => {
             }
         } catch (err) {
             console.error('Error loading Notion databases:', err);
-            setError('Failed to load Notion databases. Please check your API key and permissions.');
+            setError('Failed to load Notion databases. You may need to share your database with the integration.');
+            
+            // Create a fallback demo database
+            const demoDB = {
+                id: 'demo-database-fallback',
+                title: [{ plain_text: 'Demo Database (Fallback)' }]
+            };
+            setDatabases([demoDB]);
+            setSelectedDatabase(demoDB);
         } finally {
             setLoading(false);
         }
@@ -60,7 +69,7 @@ const NotionPageSelector = ({ notionClient, onSelectPage, selectedPageId }) => {
             setPages(pages || []);
         } catch (err) {
             console.error('Error loading Notion pages:', err);
-            setError('Failed to load pages from the selected database.');
+            setError('Failed to load pages from the selected database. You may need to share your pages with the integration.');
         } finally {
             setLoadingPages(false);
         }
@@ -75,13 +84,38 @@ const NotionPageSelector = ({ notionClient, onSelectPage, selectedPageId }) => {
         setIsVisible(false);
     };
 
+    const handleCreateManualPage = () => {
+        if (!manualPageEntry.trim()) return;
+        
+        // Create a manual page object
+        const manualPage = {
+            id: 'manual-' + Date.now(),
+            properties: {
+                Name: {
+                    title: [
+                        {
+                            text: { content: manualPageEntry },
+                            plain_text: manualPageEntry
+                        }
+                    ]
+                }
+            },
+            parent: { 
+                database_id: selectedDatabase?.id || 'manual-database'
+            }
+        };
+        
+        onSelectPage(manualPage);
+        setIsVisible(false);
+    };
+
     // Get page title from Notion page object
     const getPageTitle = (page) => {
         // Notion page titles can be in different formats
         try {
             // Try to find title property
-            const titleProperty = Object.values(page.properties).find(
-                prop => prop.type === 'title'
+            const titleProperty = Object.values(page.properties || {}).find(
+                prop => prop?.type === 'title'
             );
             
             if (titleProperty && titleProperty.title && titleProperty.title.length > 0) {
@@ -89,7 +123,7 @@ const NotionPageSelector = ({ notionClient, onSelectPage, selectedPageId }) => {
             }
             
             // If no title property found, try to use the name property
-            const nameProperty = page.properties.Name || page.properties.name;
+            const nameProperty = page.properties?.Name || page.properties?.name;
             if (nameProperty && nameProperty.title && nameProperty.title.length > 0) {
                 return nameProperty.title.map(t => t.plain_text).join('');
             }
@@ -97,7 +131,7 @@ const NotionPageSelector = ({ notionClient, onSelectPage, selectedPageId }) => {
             // If nothing else works, use the page ID
             return `Page ${page.id.slice(0, 8)}...`;
         } catch (err) {
-            console.error('Error getting page title:', err);
+            console.error('Error getting page title:', err, page);
             return 'Untitled';
         }
     };
@@ -166,8 +200,30 @@ const NotionPageSelector = ({ notionClient, onSelectPage, selectedPageId }) => {
                                                 </ul>
                                             </div>
                                         ) : (
-                                            <div className="text-sm text-gray-500">No pages found in this database</div>
+                                            <div className="text-sm text-gray-500 mb-2">No pages found in this database</div>
                                         )}
+                                        
+                                        <div className="mt-4">
+                                            <label className="block text-sm font-medium mb-1">
+                                                Or create a new page:
+                                            </label>
+                                            <div className="flex">
+                                                <input 
+                                                    type="text" 
+                                                    className="flex-1 px-3 py-2 border rounded-l-md dark:bg-gray-700 dark:border-gray-600"
+                                                    placeholder="Enter page title"
+                                                    value={manualPageEntry}
+                                                    onChange={(e) => setManualPageEntry(e.target.value)}
+                                                />
+                                                <button
+                                                    onClick={handleCreateManualPage}
+                                                    className="px-3 py-2 bg-blue-500 text-white rounded-r-md"
+                                                    disabled={!manualPageEntry.trim()}
+                                                >
+                                                    Create
+                                                </button>
+                                            </div>
+                                        </div>
                                     </div>
                                 )}
                             </>

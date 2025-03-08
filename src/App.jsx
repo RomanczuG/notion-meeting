@@ -121,24 +121,36 @@ function App() {
         if (isRecording && notionClient) {
             if (selectedNotionPage) {
                 // Use the selected page
+                console.log('Using selected Notion page:', selectedNotionPage.id);
                 setCurrentNotionPage(selectedNotionPage);
+                setNotionStatus(`Using Notion page: ${getPageTitle(selectedNotionPage)}`);
             } else if (!currentNotionPage) {
                 // Create a new page if none selected
                 const createPage = async () => {
                     try {
                         // Since we're not using API key method anymore, we need to get database from selected page
-                        // This is just a placeholder - in a real app, you'd need to get the database ID from somewhere else
                         const databases = await notionClient.getUserDatabases();
                         if (databases && databases.length > 0) {
+                            const title = `Meeting Transcript - ${new Date().toLocaleString()}`;
+                            console.log(`Creating new page "${title}" in database ${databases[0].id}`);
+                            
+                            setNotionStatus(`Creating new Notion page...`);
+                            
                             const page = await notionClient.createPage(
                                 databases[0].id,
-                                `Meeting Transcript - ${new Date().toLocaleString()}`
+                                title
                             );
+                            
+                            console.log('Created new Notion page:', page);
                             setCurrentNotionPage(page);
+                            setNotionStatus(`Created new Notion page: ${title}`);
+                        } else {
+                            console.error('No databases available to create page');
+                            setNotionStatus('Error: No Notion databases available');
                         }
                     } catch (error) {
                         console.error('Failed to create Notion page:', error);
-                        // Optionally show error to user
+                        setNotionStatus(`Error creating Notion page: ${error.message}`);
                     }
                 };
                 createPage();
@@ -177,14 +189,20 @@ function App() {
                             ? `[Speaker ${segment.label}] ${segment.text.trim()}`
                             : segment.text.trim();
                     
-                    // Send to Notion
-                    await notionClient.appendToPage(
-                        currentNotionPage.id,
-                        formattedText,
-                        segment.label || segment.speaker
-                    );
+                    console.log(`Sending to Notion: "${formattedText}"`);
                     
-                    console.log(`✅ Added to Notion: ${formattedText}`);
+                    try {
+                        // Send to Notion
+                        await notionClient.appendToPage(
+                            currentNotionPage.id,
+                            formattedText,
+                            segment.label || segment.speaker
+                        );
+                        
+                        console.log(`✅ Added to Notion: ${formattedText}`);
+                    } catch (appendError) {
+                        console.error(`Failed to append segment to Notion: ${appendError.message}`);
+                    }
                     
                     // Update last processed segment after each successful append
                     lastProcessedSegment.current = segment;
@@ -353,6 +371,18 @@ function App() {
         return () => clearInterval(cleanupInterval);
     }, [isRecording, isRealtime]);
 
+    // Monitor recording state changes
+    useEffect(() => {
+        if (isRecording) {
+            console.log('Recording started');
+            // Any recording start logic can go here
+        } else {
+            console.log('Recording stopped');
+            setNotionStatus('Recording stopped. Transcription complete.');
+            // Any recording stop logic can go here
+        }
+    }, [isRecording]);
+
     const handleWorkerMessage = useCallback((e) => {
         if (e.data.type === 'chunk_complete') {
             if (e.data.result?.transcript) {
@@ -492,16 +522,27 @@ function App() {
 // Helper to get Notion page title
 const getPageTitle = (page) => {
     try {
-        const titleProperty = Object.values(page.properties).find(
-            prop => prop.type === 'title'
+        if (!page) return 'Untitled Page';
+        
+        // Try to find title property
+        const titleProperty = Object.values(page.properties || {}).find(
+            prop => prop?.type === 'title'
         );
         
-        if (titleProperty && titleProperty.title.length > 0) {
+        if (titleProperty && titleProperty.title && titleProperty.title.length > 0) {
             return titleProperty.title.map(t => t.plain_text).join('');
         }
         
-        return 'Untitled Page';
+        // If no title property found, try to use the name property
+        const nameProperty = page.properties?.Name || page.properties?.name;
+        if (nameProperty && nameProperty.title && nameProperty.title.length > 0) {
+            return nameProperty.title.map(t => t.plain_text).join('');
+        }
+        
+        // If nothing else works, use the page ID
+        return `Page ${page.id.slice(0, 8)}...`;
     } catch (err) {
+        console.error('Error getting page title:', err, page);
         return 'Untitled Page';
     }
 };
