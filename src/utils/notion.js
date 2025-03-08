@@ -326,17 +326,23 @@ class NotionClient {
         }
     }
 
-    async updateEntirePage(pageId, content) {
+    async updateEntirePage(pageId, content, preserveHistory = true) {
         if (this.isDemo) {
             console.log('Updating entire demo page:', pageId);
             const page = this.demoPages.find(p => p.id === pageId);
             if (!page) throw new Error('Demo page not found');
-            // Replace entire content
-            page.content = [content];
+            
+            if (preserveHistory) {
+                // Append to content
+                page.content = [...(page.content || []), '---', new Date().toLocaleString(), '---', content];
+            } else {
+                // Replace entire content
+                page.content = [content];
+            }
             return { success: true };
         }
         
-        console.log(`Updating entire page ${pageId} with new content`);
+        console.log(`Updating page ${pageId} with new content (preserveHistory: ${preserveHistory})`);
         
         try {
             // Check if pageId is valid - sometimes it might be a complex object
@@ -346,36 +352,62 @@ class NotionClient {
                 console.log(`Extracted page ID from object: ${actualPageId}`);
             }
             
-            // First, get the current blocks to delete them
-            const currentBlocks = await this.readPage(actualPageId);
-            const blockIds = currentBlocks.blocks?.map(block => block.id) || [];
-            
-            // Delete existing blocks if there are any
-            if (blockIds.length > 0) {
-                console.log(`Deleting ${blockIds.length} existing blocks`);
+            if (!preserveHistory) {
+                // If not preserving history, delete existing blocks first
+                const currentBlocks = await this.readPage(actualPageId);
+                const blockIds = currentBlocks.blocks?.map(block => block.id) || [];
                 
-                // Delete blocks in batches of 10 to avoid rate limits
-                for (let i = 0; i < blockIds.length; i += 10) {
-                    const batchIds = blockIds.slice(i, i + 10);
-                    for (const blockId of batchIds) {
-                        try {
-                            await fetch(`https://api.notion.com/v1/blocks/${blockId}`, {
-                                method: 'DELETE',
-                                headers: {
-                                    'Authorization': this.authHeader,
-                                    'Content-Type': 'application/json',
-                                    'Notion-Version': '2022-06-28'
-                                }
-                            });
-                        } catch (deleteError) {
-                            console.error(`Failed to delete block ${blockId}:`, deleteError);
-                            // Continue with other blocks
+                // Delete existing blocks if there are any
+                if (blockIds.length > 0) {
+                    console.log(`Deleting ${blockIds.length} existing blocks`);
+                    
+                    // Delete blocks in batches of 10 to avoid rate limits
+                    for (let i = 0; i < blockIds.length; i += 10) {
+                        const batchIds = blockIds.slice(i, i + 10);
+                        for (const blockId of batchIds) {
+                            try {
+                                await fetch(`https://api.notion.com/v1/blocks/${blockId}`, {
+                                    method: 'DELETE',
+                                    headers: {
+                                        'Authorization': this.authHeader,
+                                        'Content-Type': 'application/json',
+                                        'Notion-Version': '2022-06-28'
+                                    }
+                                });
+                            } catch (deleteError) {
+                                console.error(`Failed to delete block ${blockId}:`, deleteError);
+                                // Continue with other blocks
+                            }
                         }
                     }
                 }
             }
             
-            // Then add the new content
+            // Add a divider and timestamp if preserving history
+            if (preserveHistory) {
+                // Add a divider
+                await this.appendToPage(
+                    actualPageId,
+                    '---',
+                    null
+                );
+                
+                // Add a timestamp
+                await this.appendToPage(
+                    actualPageId,
+                    `📝 GPT-Enhanced Notes - ${new Date().toLocaleString()}`,
+                    null
+                );
+                
+                // Add another divider
+                await this.appendToPage(
+                    actualPageId,
+                    '---',
+                    null
+                );
+            }
+            
+            // Add the new content
             const response = await fetch(`/api/notion/append`, {
                 method: 'POST',
                 headers: {
@@ -396,7 +428,7 @@ class NotionClient {
                 throw new Error(`Failed to update Notion page: ${response.statusText}`);
             }
 
-            console.log('Successfully updated entire Notion page');
+            console.log(`Successfully ${preserveHistory ? 'appended to' : 'replaced'} Notion page`);
             return data;
         } catch (error) {
             console.error('Error in updateEntirePage:', error);

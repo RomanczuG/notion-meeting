@@ -287,11 +287,12 @@ function App() {
                 pendingTranscriptBatch
             );
             
-            // 3. Update the entire Notion page
+            // 3. Update the Notion page, preserving history
             if (enhancedResult.success) {
                 console.log('Enhanced content:', enhancedResult.enhanced);
                 setNotionStatus('Updating Notion page with enhanced transcript...');
                 
+                // Use updateEntirePage with preserveHistory=true (default)
                 await notionClient.updateEntirePage(
                     currentNotionPage.id,
                     enhancedResult.enhanced
@@ -307,6 +308,7 @@ function App() {
                     seg.speaker ? `### Speaker ${seg.speaker}\n${seg.text.trim()}` : seg.text.trim()
                 ).join('\n\n');
                 
+                // Use updateEntirePage with preserveHistory=true (default)
                 await notionClient.updateEntirePage(
                     currentNotionPage.id,
                     formattedText

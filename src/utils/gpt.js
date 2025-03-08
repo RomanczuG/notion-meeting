@@ -19,27 +19,29 @@ export async function enhanceWholeTranscript(currentContent, newTranscripts) {
                 : segment.text.trim();
         }).join('\n');
         
-        // Preparing a prompt that asks GPT to enhance the entire document
+        // Preparing a prompt that asks GPT to enhance just the new content
         const prompt = `
 You are an AI assistant helping to create better meeting notes in real-time.
 
-CURRENT TRANSCRIPT:
+The meeting is ongoing. Below, you'll see:
+1. Some context from earlier in the meeting (CONTEXT section)
+2. The latest batch of transcriptions that need to be processed (NEW TRANSCRIPT SEGMENTS)
+
+CONTEXT (earlier parts of the meeting - for reference only):
 ${currentContent || "The meeting just started."}
 
-NEW TRANSCRIPT SEGMENTS TO ADD:
+NEW TRANSCRIPT SEGMENTS:
 ${formattedNewTranscripts}
 
-Using all the information, please create a complete, well-formatted set of meeting notes.
+Your task is to create a well-formatted CONTEXT that includes the entire meeting with new segments.
 Please:
-1. Structure the meeting notes with headers, bullet points, and organized sections
+1. Structure this segment with headers, bullet points, and organized sections
 2. Highlight key decisions, action items and important points
 3. Make it easy to read and well-organized
-4. Keep the chronological flow of the meeting
-5. Include all important content from both current and new transcript sections
-6. Format for Notion using Markdown
+4. Keep the chronological flow
+5. Format for Notion using Markdown
 
-Your response should ONLY contain the enhanced meeting notes (no explanations). 
-This will directly replace the entire page content in Notion.
+Your response should contain the enhanced notes for the CONTEXT and NEW SEGMENTS (no explanations).
 `;
 
         const response = await fetch('/api/gpt/enhance', {
